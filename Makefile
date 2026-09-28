@@ -15,7 +15,7 @@ SANE_CFLAGS := $(shell pkg-config --cflags sane-backends 2>/dev/null)
 
 BUILD := build
 
-all: $(BUILD)/neat-scan $(BUILD)/libsane-neat.so.1
+all: $(BUILD)/neat-scan $(BUILD)/nd1000-probe $(BUILD)/libsane-neat.so.1 $(BUILD)/libsane-nd1000.so.1
 
 $(BUILD):
 	mkdir -p $@
@@ -26,11 +26,17 @@ $(BUILD)/nm1000.o: src/nm1000.c src/nm1000.h src/nm1000_tables.h | $(BUILD)
 $(BUILD)/neat-scan: src/neat-scan.c $(BUILD)/nm1000.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(USB_LIBS)
 
+$(BUILD)/nd1000-probe: src/nd1000-probe.c | $(BUILD)
+	$(CC) $(CFLAGS) $(USB_CFLAGS) $(LDFLAGS) -o $@ $< $(USB_LIBS)
+
 $(BUILD)/sane-neat.o: src/sane-neat.c src/nm1000.h | $(BUILD)
 	$(CC) $(CFLAGS) $(USB_CFLAGS) $(SANE_CFLAGS) -fvisibility=hidden -c -o $@ $<
 
 $(BUILD)/libsane-neat.so.1: $(BUILD)/sane-neat.o $(BUILD)/nm1000.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -shared -Wl,-soname,libsane-neat.so.1 -Wl,--no-undefined -o $@ $^ $(USB_LIBS)
+
+$(BUILD)/libsane-nd1000.so.1: src/sane-nd1000.c | $(BUILD)
+	$(CC) $(CFLAGS) $(USB_CFLAGS) $(SANE_CFLAGS) $(LDFLAGS) -fPIC -fvisibility=hidden -shared -Wl,-soname,libsane-nd1000.so.1 -o $@ $< $(USB_LIBS)
 
 install: all
 	install -Dm755 $(BUILD)/libsane-neat.so.1 $(DESTDIR)$(LIBDIR)/sane/libsane-neat.so.1

@@ -4,6 +4,47 @@ A SANE backend (`neat`) for the **Neat NM-1000 / Neat Receipts mobile scanner**
 (USB `1f44:0001`), so it works with SimpleScan, `scanimage`, XSane and any other
 SANE frontend. It needs no Neat software at runtime.
 
+**ND-1000 (`1f44:0050`):** a separate SANE bridge is available below. The
+original `neat` backend remains NM-1000-only; `build/nd1000-probe` can inspect
+the ND hardware. See [the investigation notes](re/README.md#nd-1000-investigation).
+
+### ND-1000 SANE bridge (experimental)
+
+The separate `nd1000` backend supports **duplex RGB ADF**, with selectable
+150, 200, 300 or 600 dpi (150 and 600 dpi tested on paper so far). The scanner
+images both sides in one pass; `--source` selects `ADF Duplex` (default, front
+then back), `ADF Front`, or `ADF Back`. It runs Neat's ND-1000 Windows driver
+DLL through the included `pe-harness` tracer (no Windows VM); the NM-1000
+native driver above remains independent. The DLL is proprietary and is **not**
+included in this repository, so this bridge is a stopgap until the ND-1000
+protocol is fully reversed. Details and limitations are in
+[re/README.md](re/README.md#nd-1000-investigation).
+
+```sh
+make && make -C re/pe-harness
+# Extract Neat's ND-1000 x64 MSI with 7z (link in re/README.md), then:
+sudo bash packaging/install-nd1000-bridge.sh /path/to/neatadfscanner_x64.dll
+# Replug scanner; load one sheet and run:
+scanimage -L
+scanimage -d nd1000:usb:1f44:0050 --format=png -o page.png
+scanimage -d nd1000:usb:1f44:0050 --resolution 600 --format=png -o page-600.png
+scanimage -d nd1000:usb:1f44:0050 --source 'ADF Duplex' --batch='scan-%d.png'
+```
+
+The installer also enables `saned.socket` (TCP 6566). It allows `127.0.0.1`,
+Tailscale (`100.64.0.0/10`) and, by default, this host's primary LAN subnet;
+set `ND_LAN_CIDR=YOUR_SUBNET/24` to override. On another Linux machine add this
+host's LAN or Tailscale address to `/etc/sane.d/net.conf` and use
+`scanimage -L`. The backend performs the page acquisition during `sane_start()`
+and then serves the buffered image to the frontend.
+
+To check the network path from the server itself, use the isolated client
+configuration in `dev-sane/` (net backend pointed at localhost):
+
+```sh
+SANE_CONFIG_DIR="$PWD/dev-sane" scanimage -L
+```
+
 - Colour or gray, 150 / 200 / 300 / 600 dpi, full 8.5" width
 - Each sheet is scanned until its trailing edge passes the sensor, then ejected
 - Uses the factory calibration stored in the scanner's own flash (read once,

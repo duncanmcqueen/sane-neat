@@ -11,6 +11,8 @@ extern int trace_bulk_in_full;
 extern const char *bulk_dump_dir;
 
 void trace(const char *fmt, ...);
+int pe_set_usb_product(uint16_t pid);
+int pe_usb_accessible(void);
 void *pe_load(const char *path);
 void *pe_export(const char *name);
 uint8_t *image_base(void);

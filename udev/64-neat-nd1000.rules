@@ -1,0 +1,3 @@
+# ND-1000 USB access for the SANE bridge and protocol investigation.
+# Sort before 66-saned.rules and 70-uaccess.rules so their ACLs apply.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1f44", ATTR{idProduct}=="0050", ENV{libsane_matched}="yes"

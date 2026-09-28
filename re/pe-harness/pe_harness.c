@@ -72,7 +72,61 @@ void trace(const char *fmt, ...)
 
 static libusb_context *usb_ctx;
 static libusb_device_handle *usb_dev;
+static uint16_t usb_pid = 0x0001;
 #define FAKE_USB_HANDLE ((HANDLE)(intptr_t)0x5c5c0001)
+
+int pe_set_usb_product(uint16_t pid)
+{
+    if (usb_dev || (pid != 0x0001 && pid != 0x0050))
+        return 0;
+    usb_pid = pid;
+    return 1;
+}
+
+/* Fail before loading the vendor DLL when USB is not accessible. Otherwise
+ * the DLL retries USBSCAN0 for a long time and hides the real problem. */
+int pe_usb_accessible(void)
+{
+    libusb_context *ctx = NULL;
+    libusb_device **list = NULL;
+    ssize_t count;
+    int rc = 0;
+    if (libusb_init(&ctx))
+        return 0;
+    count = libusb_get_device_list(ctx, &list);
+    if (count < 0) {
+        libusb_exit(ctx);
+        return 0;
+    }
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        libusb_device_handle *h = NULL;
+        if (libusb_get_device_descriptor(list[i], &desc) ||
+            desc.idVendor != 0x1f44 || desc.idProduct != usb_pid)
+            continue;
+        int err = libusb_open(list[i], &h);
+        if (err)
+            fprintf(stderr, "harness: 1f44:%04x: %s (check USB ACL)\n", usb_pid,
+                    libusb_error_name(err));
+        else {
+            libusb_set_auto_detach_kernel_driver(h, 1);
+            err = libusb_claim_interface(h, 0);
+            if (err)
+                fprintf(stderr, "harness: cannot claim interface 0: %s\n", libusb_error_name(err));
+            else {
+                libusb_release_interface(h, 0);
+                rc = 1;
+            }
+            libusb_close(h);
+        }
+        break;
+    }
+    if (!rc)
+        fprintf(stderr, "harness: 1f44:%04x is unavailable\n", usb_pid);
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return rc;
+}
 
 static int usb_open(void)
 {
@@ -80,9 +134,9 @@ static int usb_open(void)
         return 1;
     if (libusb_init(&usb_ctx) != 0)
         return 0;
-    usb_dev = libusb_open_device_with_vid_pid(usb_ctx, 0x1f44, 0x0001);
+    usb_dev = libusb_open_device_with_vid_pid(usb_ctx, 0x1f44, usb_pid);
     if (!usb_dev) {
-        fprintf(stderr, "harness: cannot open 1f44:0001\n");
+        fprintf(stderr, "harness: cannot open 1f44:%04x (check udev permissions)\n", usb_pid);
         return 0;
     }
     libusb_set_auto_detach_kernel_driver(usb_dev, 1);
@@ -145,14 +199,19 @@ static BOOL usb_ioctl(DWORD code, void *in, DWORD in_len, void *out, DWORD out_l
         trace("\n");
         return 1;
     case IOCTL_GET_DEVICE_DESCRIPTOR: {
+        struct libusb_device_descriptor desc;
         uint16_t *d = out;
-        d[0] = 0x1f44;
-        d[1] = 0x0001;
-        d[2] = 0x0602;
+        if (out_len < 8 || libusb_get_device_descriptor(libusb_get_device(usb_dev), &desc))
+            return 0;
+        d[0] = desc.idVendor;
+        d[1] = desc.idProduct;
+        /* Field 2: the NM-1000 driver only ever saw the original constant,
+         * so keep it there; the ND-1000 driver wants the device's bcdDevice. */
+        d[2] = usb_pid == 0x0001 ? 0x0602 : desc.bcdDevice;
         d[3] = 0x0409;
         if (ret_len)
             *ret_len = 8;
-        trace("IOCTL GET_DEVICE_DESCRIPTOR\n");
+        trace("IOCTL GET_DEVICE_DESCRIPTOR %04x:%04x bcdDevice=%04x\n", d[0], d[1], d[2]);
         return 1;
     }
     case IOCTL_RESET_PIPE:
@@ -441,6 +500,9 @@ static WINAPI DWORD k_GetTickCount(void)
     return ts.tv_sec * 1000u + ts.tv_nsec / 1000000u;
 }
 
+/* The ND-1000 DLL checks the Windows version during DllMain. Present Win 7. */
+static WINAPI DWORD k_GetVersion(void) { return (7601u << 16) | (1u << 8) | 6u; }
+
 static WINAPI DWORD k_GetLastError(void) { return last_error; }
 static WINAPI void k_SetLastError(DWORD e) { last_error = e; }
 
@@ -622,6 +684,7 @@ static WINAPI void k_GetStartupInfoA(void *si)
     memset(si, 0, 104);
     *(DWORD *)si = 104;
 }
+static WINAPI void k_GetStartupInfoW(void *si) { k_GetStartupInfoA(si); }
 
 static WINAPI HANDLE k_GetStdHandle(DWORD n) { return (HANDLE)(intptr_t)(0x100 + (n & 0xff)); }
 static WINAPI DWORD k_GetFileType(HANDLE h) { (void)h; return 2; /* FILE_TYPE_CHAR */ }
@@ -919,6 +982,7 @@ static const struct stub stubs[] = {
     {"kernel32.dll", "DeviceIoControl", k_DeviceIoControl},
     {"kernel32.dll", "CreateEventA", k_CreateEventA},
     {"kernel32.dll", "GetTickCount", k_GetTickCount},
+    {"kernel32.dll", "GetVersion", k_GetVersion},
     {"kernel32.dll", "GetOverlappedResult", k_GetOverlappedResult},
     {"kernel32.dll", "CreateFileA", k_CreateFileA},
     {"kernel32.dll", "ReadFile", k_ReadFile},
@@ -984,6 +1048,7 @@ static const struct stub stubs[] = {
     {"kernel32.dll", "SetStdHandle", k_SetStdHandle},
     {"kernel32.dll", "GetFileType", k_GetFileType},
     {"kernel32.dll", "GetStartupInfoA", k_GetStartupInfoA},
+    {"kernel32.dll", "GetStartupInfoW", k_GetStartupInfoW},
     {"kernel32.dll", "GetEnvironmentStrings", k_GetEnvironmentStrings},
     {"kernel32.dll", "GetEnvironmentStringsW", k_GetEnvironmentStringsW},
     {"kernel32.dll", "FreeEnvironmentStringsA", k_FreeEnvironmentStrings},

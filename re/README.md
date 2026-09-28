@@ -5,13 +5,86 @@ contains no vendor code.
 
 ## Vendor driver
 
-Neat's Windows driver (the same one for NC-1000 / ND-1000 / NM-1000):
+The NM-1000 trace was made with Neat's mobile Windows driver:
 
     https://s3.amazonaws.com/scanner-drivers/Windows/NeatMobile/x64/Scanner.Install64.Neat.Mobile.MSI.msi
     sha256 cb006d10beb41cc20d14eb0b35cbdb866fb0ddba44335644bf42d66ff9cba794
 
 `7z x` the MSI to get `neatmobilescanner_x64.dll`. It has a single export,
 `int SNCmd(cmd, uint *params, void *buf, float *f, int p5, uint p6)`:
+
+The ND-1000 has its **own** Windows package at
+`https://s3.amazonaws.com/scanner-drivers/Windows/NeatDesk/x64/Scanner.Install64.Neat.ADF.MSI.msi`.
+Its INF explicitly matches USB `1f44:0050`, and the package contains
+`neatadfscanner_x64.dll`, which also exports `SNCmd`. Its commands and register
+tables have **not** been checked against the NM-1000 traces. Do not run the
+NM-1000 scan core against the ND-1000 just by changing the product ID.
+
+### ND-1000 investigation
+
+Build the discovery tool and tracing harness:
+
+    make
+    make -C re/pe-harness
+    ./build/nd1000-probe
+
+The default probe only enumerates USB descriptors. The optional
+`./build/nd1000-probe --read-register-41` sends **one** NM-style register read
+(no writes or motor actions); it needs USB access. A `0x55` status indicates
+that this read format is recognized, but does not validate NM register programs.
+Fix the device's udev ACL first; do not run scanning software as root.
+The USB node usually belongs to root without an ACL. For a temporary test, use
+the bus and device numbers reported by `nd1000-probe` (they change when
+replugging); for example, if it reports bus 003 address 060:
+
+    sudo setfacl -m "u:$(id -u):rw" /dev/bus/usb/003/060
+    ./build/nd1000-probe --read-register-41
+
+For persistent access, install
+`udev/64-neat-nd1000.rules` into `/etc/udev/rules.d/`, reload udev rules and
+replug the scanner. The NM-1000's `udev/70-neat-nm1000.rules` only covers
+`1f44:0001`. The ND bridge installer installs this rule automatically;
+`make install` only installs the original NM backend.
+
+    sudo install -m 644 udev/64-neat-nd1000.rules /etc/udev/rules.d/
+    sudo udevadm control --reload-rules
+    # unplug and replug the scanner, then verify with getfacl on its new USB path
+
+For a vendor-driver trace, extract the ND MSI with `7z x` and run the harness
+with the ND DLL and `NEAT_USB_PID=0050`. The harness forwards USB requests from
+the vendor DLL to real hardware, so start with `status` and examine the trace
+before attempting scan, feed, or calibration. It is not needed for normal SANE
+operation and does not install a Windows driver:
+
+    NEAT_USB_PID=0050 NEAT_TRACE=nd-status.log \
+      re/pe-harness/neatcap /path/to/neatadfscanner_x64.dll status
+
+For a duplex capture, pass front and back output paths:
+
+    NEAT_USB_PID=0050 re/pe-harness/neatcap /path/to/neatadfscanner_x64.dll \
+      duplex 150 24 front.pnm back.pnm
+
+The harness selects the USB device by `NEAT_USB_PID` and passes the real
+attached device's VID/PID and, for the ND-1000, `bcdDevice` to the DLL; the
+NM-1000 keeps the descriptor constant its driver expects. Some DLL imports may
+need additional stubs before the ND driver can run. Keep the DLL and captured
+traces outside this GPL repository. Once the ND trace is known, derive separate
+initialization, calibration, motor, duplex, and scan programs; the existing
+`nm1000_tables.h` is specific to the NM-1000.
+
+ND findings: `SNCmd(0x16)` returns `1` with a sheet loaded and `0xe107`
+with an empty feeder. `SNCmd(0x9)` dereferences the fourth argument, unlike
+the NM DLL. The ND TWAIN source uses scan method `0x80` for duplex,
+`0x800` for simplex/ADF, and `0x08` for flatbed; method `0x08` detected the
+sheet but never moved it and timed out with `0xe11c`. With `0x80`, the device
+images **both sides in one pass**: reads return full lines for the front until
+status `0x1001`, then full lines for the back until `0xe10d`. At 150 dpi each
+side is `1272x1600` RGB. The harness `duplex RES BPP FRONT BACK` action captures
+both sides; `src/sane-nd1000.c` serves them as two SANE pages and exposes
+`ADF Front` / `ADF Back` / `ADF Duplex`. The NM-style eject (`0x13`) expects
+additional ND-specific arguments, so the harness does **not** attempt ND
+ejection. No native ND register tables have been validated yet; the bridge
+still needs Neat's DLL at runtime.
 
 | cmd  | meaning                                          |
 |------|--------------------------------------------------|
@@ -25,7 +98,7 @@ Neat's Windows driver (the same one for NC-1000 / ND-1000 / NM-1000):
 | 9    | lamp on/off (`p5`)                               |
 | 0x10 | buttons                                          |
 | 0x13 | feed `p6` motor steps                            |
-| 0x16 | paper present? (0 = yes)                         |
+| 0x16 | paper present? (NM: 0 = yes; ND: 1 = yes, 0xe107 = empty)  |
 
 ## pe-harness
 
