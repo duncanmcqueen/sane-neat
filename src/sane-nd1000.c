@@ -226,8 +226,8 @@ static SANE_Status acquire(struct nd_scanner *s)
     }
     nd1000_set_duplex(s->dev, s->source == SRC_DUPLEX);
     /* Always scan the full page height. Stopping the motor early to save time
-     * leaves the sheet mid-feeder, because eject (SNCmd 0x13) is not decoded
-     * yet; revisit this once feed/eject works. */
+     * leaves the sheet mid-feeder: SNCmd 0x13 is the inward feed, not an eject,
+     * so the sheet cannot be pushed out. Revisit once an eject command exists. */
     r = nd1000_start(s->dev, s->resolution, MAX_HEIGHT_MM, &info);
     if (r) {
         nd1000_close(s->dev);
