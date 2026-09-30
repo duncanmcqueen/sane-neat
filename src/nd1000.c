@@ -547,7 +547,7 @@ int nd1000_start(struct nd1000 *d, int dpi, int max_height_mm, struct nd1000_sca
 
     d->mode = m;
     d->bpl = m->pixels * (m->color ? 3 : 1);
-    d->lines_max = (int)((long)max_height_mm * dpi * 10 / 254);
+    d->lines_max = (int)(((long)max_height_mm * dpi * 10 + 127) / 254);
     d->lines_done = 0;
     d->data_seen = 0;
     d->side = 0;

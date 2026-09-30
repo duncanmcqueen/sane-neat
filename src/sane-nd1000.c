@@ -217,7 +217,14 @@ static SANE_Status acquire(struct nd_scanner *s)
         return r == 0 ? SANE_STATUS_NO_DOCS : SANE_STATUS_IO_ERROR;
     }
     nd1000_set_duplex(s->dev, s->source == SRC_DUPLEX);
-    r = nd1000_start(s->dev, s->resolution, MAX_HEIGHT_MM, &info);
+    /* Program and bound the drain to the requested page height, so the motor
+     * stops after the area the frontend asked for instead of the full 279 mm.
+     * nd1000_read_all adds a 512-record margin that covers the warm-up header
+     * (rec0) and skipped records, so a few extra mm is enough. */
+    int scan_mm = (int)(SANE_UNFIX(s->br_y) + 6.5);
+    if (scan_mm > MAX_HEIGHT_MM)
+        scan_mm = MAX_HEIGHT_MM;
+    r = nd1000_start(s->dev, s->resolution, scan_mm, &info);
     if (r) {
         nd1000_close(s->dev);
         s->dev = NULL;
@@ -235,15 +242,17 @@ static SANE_Status acquire(struct nd_scanner *s)
     }
 
     W = info.pixels;
-    Hf = nd1000_decode_height(s->resolution, 0, rawlen);
-    if (Hf > info.max_lines)
-        Hf = info.max_lines;
+    int Hstream = nd1000_decode_height(s->resolution, 0, rawlen);
     /* A partial FIFO stream must not masquerade as a successfully scanned
-     * page. Both sides of one sheet must have comparable line counts. */
-    if (Hf < s->resolution / 2) {
+     * page. When the drain reaches its bound there are always at least
+     * info.max_lines decodable lines, so a shorter stream was truncated. The
+     * check uses the uncapped stream height: info.max_lines is deliberately
+     * small when the frontend requested a short page. */
+    if (Hstream < info.max_lines) {
         free(raw);
         return SANE_STATUS_IO_ERROR;
     }
+    Hf = Hstream > info.max_lines ? info.max_lines : Hstream;
     if (s->source != SRC_BACK) {
         if (Hf > 0) {
             front = malloc((size_t)W * Hf * 3);

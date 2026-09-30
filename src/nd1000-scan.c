@@ -87,19 +87,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    front_lines = nd1000_decode_height(dpi, 0, rawlen);
-    if (front_lines > info.max_lines)
-        front_lines = info.max_lines;
-    if (duplex) {
-        back_lines = nd1000_decode_height(dpi, 1, rawlen);
-        if (back_lines > info.max_lines)
-            back_lines = info.max_lines;
-    }
-    if (front_lines < dpi / 2 || (duplex && back_lines < front_lines / 2)) {
+    int front_stream = nd1000_decode_height(dpi, 0, rawlen);
+    int back_stream = duplex ? nd1000_decode_height(dpi, 1, rawlen) : 0;
+    /* Bound the result to the requested height, but test completeness against
+     * the uncapped stream height: info.max_lines may be small on purpose. */
+    if (front_stream < info.max_lines || (duplex && back_stream < front_stream / 2)) {
         fprintf(stderr, "incomplete page in the raw stream\n");
         free(raw);
         return 1;
     }
+    front_lines = front_stream > info.max_lines ? info.max_lines : front_stream;
+    back_lines = back_stream > info.max_lines ? info.max_lines : back_stream;
 
     front = malloc((size_t)info.pixels * 3 * front_lines);
     back = duplex ? malloc((size_t)info.pixels * 3 * back_lines) : NULL;

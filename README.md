@@ -45,10 +45,11 @@ SANE_CONFIG_DIR="$PWD/dev-sane" scanimage -L
 Limitations: the scanner's native gray mode is not available (the vendor DLL
 crashes while capturing it), so `Gray` is produced by converting the colour
 scan. The vendor's trailing-edge end-of-paper registers are not yet decoded:
-the native scan is bounded to the requested height and then uses a content-
-based trailing crop. `SNCmd 0x13` feed/eject is not decoded. The standalone
-`nd1000-scan` tool shares the native full-pass decoder; like the SANE backend,
-it only offers duplex at 300 dpi.
+the native scan is bounded to the requested scan area (`br-y`, defaulting to
+the full page) and then uses a content-based trailing crop, so it stops the
+motor after the requested height instead of always running 279 mm. `SNCmd 0x13`
+feed/eject is not decoded. The standalone `nd1000-scan` tool shares the native
+full-pass decoder; like the SANE backend, it only offers duplex at 300 dpi.
 
 ### NM-1000 features
 
