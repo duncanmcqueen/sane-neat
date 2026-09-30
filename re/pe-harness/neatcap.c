@@ -7,6 +7,7 @@
  *   neatcap DLL status
  *   neatcap DLL scan RES BPP OUT.pnm [WIDTH_PX HEIGHT_PX]
  *   neatcap DLL duplex RES BPP FRONT.pnm BACK.pnm
+ *   neatcap DLL program RES BPP      (register programming only, no reads)
  *   neatcap DLL calibrate
  *   neatcap DLL feed STEPS
  *   neatcap DLL raw CMD P5 P6
@@ -26,6 +27,8 @@ typedef int (*__attribute__((ms_abi)) sncmd_t)(uint32_t cmd, uint32_t *params, v
                                                  int p5, uint32_t p6);
 static sncmd_t SNCmd;
 static int nd1000;
+static uint32_t nd_method = 0x80; /* 0x80 duplex, 0x800 simplex/ADF, 0x08 flatbed */
+static int capture_only;          /* run the setup phases, then stop before reads */
 static volatile sig_atomic_t stop_requested;
 
 static void request_stop(int signal_number)
@@ -108,20 +111,40 @@ static int do_scan(int res, int bpp, const char *out, const char *back_out, int 
     /* NeatADFScanner64.ds selects 0x80 for its ADF mode (0x800 for the
      * other feeder path); NM-1000 uses 0x08. With 0x08 on the ND the sheet
      * was detected but no motor movement occurred. */
-    p[0] = nd1000 ? 0x80 : 8;
+    p[0] = nd1000 ? nd_method : 8;
     p[1] = bpp;
     p[2] = res;
     p[3] = res;
-    p[4] = 0;
-    p[5] = 0;
-    p[6] = width;
-    p[7] = height;
     double gamma = 1.6;
-    memcpy(&p[8], &gamma, 8);
-    p[10] = 0xe3f0 | (0x24u << 16);
-    p[0xc] = 0x17f;
-    p[0x20d] = 1;
-    p[0x20f] = 4;
+    if (nd1000) {
+        /* Vendor NeatADFScanner64.ds block: mostly zero. Rect = {0,0,width,gap}
+         * where width is the sensor line width and gap is dpi*0x1e (0xf for
+         * 600 dpi) rounded to 16. Trailing word at 0x8ac = 4. */
+        int w = (int)(res * 8.5);
+        if (bpp == 1)
+            w -= w % 0x60;
+        else {
+            w += 0xb;
+            w -= w % 0x18;
+        }
+        int gap = (res >= 600 ? res * 0xf : res * 0x1e) & 0xfff0;
+        p[4] = 0;
+        p[5] = 0;
+        p[6] = (uint32_t)w;
+        p[7] = (uint32_t)gap;
+        memcpy(&p[8], &gamma, 8);
+        p[0x22b] = 4; /* byte offset 0x8ac */
+    } else {
+        p[4] = 0;
+        p[5] = 0;
+        p[6] = width;
+        p[7] = height;
+        memcpy(&p[8], &gamma, 8);
+        p[10] = 0xe3f0 | (0x24u << 16);
+        p[0xc] = 0x17f;
+        p[0x20d] = 1;
+        p[0x20f] = 4;
+    }
     r = cmd("set-params", 2, p, NULL, NULL, 0, 0);
     if (r >= 0xe000)
         return 1;
@@ -148,6 +171,13 @@ static int do_scan(int res, int bpp, const char *out, const char *back_out, int 
         cmd("stop", 7, NULL, NULL, NULL, 0, 0);
         cmd("lamp-off", 9, NULL, NULL, nd1000 ? (float *)lamp_params : NULL, 0, 0);
         return 1;
+    }
+    if (capture_only) {
+        /* Register-program capture: everything up to and including start is
+         * in the trace; no paper or image read is needed. */
+        cmd("stop", 7, NULL, NULL, NULL, 0, 0);
+        cmd("lamp-off", 9, NULL, NULL, nd1000 ? (float *)lamp_params : NULL, 0, 0);
+        return 0;
     }
 
     bpl = bpp == 1 ? (width + 7) / 8 : width * (bpp / 8);
@@ -237,7 +267,7 @@ int main(int argc, char **argv)
     sigemptyset(&stop_action.sa_mask);
     sigaction(SIGTERM, &stop_action, NULL);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s DLL status|scan|duplex|calibrate|feed ...\n", argv[0]);
+        fprintf(stderr, "usage: %s DLL status|scan|duplex|program|calibrate|feed ...\n", argv[0]);
         return 2;
     }
     const char *tp = getenv("NEAT_TRACE");
@@ -250,6 +280,16 @@ int main(int argc, char **argv)
             return 2;
         }
         nd1000 = pid == 0x0050;
+    }
+    const char *method_env = getenv("NEAT_ND_METHOD");
+    if (method_env && *method_env) {
+        char *end;
+        unsigned long method = strtoul(method_env, &end, 16);
+        if (*end || method > 0xffff) {
+            fprintf(stderr, "NEAT_ND_METHOD must be a hex value\n");
+            return 2;
+        }
+        nd_method = (uint32_t)method;
     }
     if (nd1000 && (!strcmp(argv[2], "feed") || !strcmp(argv[2], "calibrate") ||
                    !strcmp(argv[2], "raw"))) {
@@ -310,14 +350,21 @@ int main(int argc, char **argv)
         rc = do_scan(res, bpp, argv[5], NULL, w, h);
     } else if (!strcmp(argv[2], "duplex") && argc > 6) {
         int res = atoi(argv[3]), bpp = atoi(argv[4]);
-        if (nd1000 && ((res != 150 && res != 200 && res != 300 && res != 600) || bpp != 24)) {
-            fprintf(stderr, "ND duplex supports 150, 200, 300 or 600 dpi in color\n");
+        if (nd1000 && ((res != 150 && res != 200 && res != 300 && res != 600) ||
+                       (bpp != 24 && bpp != 8))) {
+            fprintf(stderr, "ND duplex supports 150, 200, 300 or 600 dpi in color or gray\n");
             rc = 2;
             goto close_device;
         }
         int w = res * 85 / 10 & ~3;
         int h = res * 11;
         rc = do_scan(res, bpp, argv[5], argv[6], w, h);
+    } else if (!strcmp(argv[2], "program") && argc > 4) {
+        /* Capture the set-params/calib/start register programs without
+         * reading an image; combine with NEAT_NOPAPER=1 for no-paper runs. */
+        int res = atoi(argv[3]), bpp = atoi(argv[4]);
+        capture_only = 1;
+        rc = do_scan(res, bpp, "/dev/null", NULL, res * 85 / 10 & ~3, res * 11);
     } else {
         fprintf(stderr, "bad command\n");
         rc = 2;

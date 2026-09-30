@@ -43,8 +43,9 @@ replugging); for example, if it reports bus 003 address 060:
 For persistent access, install
 `udev/64-neat-nd1000.rules` into `/etc/udev/rules.d/`, reload udev rules and
 replug the scanner. The NM-1000's `udev/70-neat-nm1000.rules` only covers
-`1f44:0001`. The ND bridge installer installs this rule automatically;
-`make install` only installs the original NM backend.
+`1f44:0001`. The native ND installer
+(`packaging/install-nd1000.sh`) installs this rule automatically; `make install`
+only installs the original NM backend.
 
     sudo install -m 644 udev/64-neat-nd1000.rules /etc/udev/rules.d/
     sudo udevadm control --reload-rules
@@ -80,11 +81,165 @@ sheet but never moved it and timed out with `0xe11c`. With `0x80`, the device
 images **both sides in one pass**: reads return full lines for the front until
 status `0x1001`, then full lines for the back until `0xe10d`. At 150 dpi each
 side is `1272x1600` RGB. The harness `duplex RES BPP FRONT BACK` action captures
-both sides; `src/sane-nd1000.c` serves them as two SANE pages and exposes
-`ADF Front` / `ADF Back` / `ADF Duplex`. The NM-style eject (`0x13`) expects
-additional ND-specific arguments, so the harness does **not** attempt ND
-ejection. No native ND register tables have been validated yet; the bridge
-still needs Neat's DLL at runtime.
+both sides; `src/sane-nd1000.c` serves them as two SANE pages through the
+native core and exposes `ADF Front` / `ADF Back` / `ADF Duplex`. The NM-style
+eject (`0x13`) expects additional ND-specific arguments, so the harness does
+**not** attempt ND ejection.
+
+Native core validation (`src/nd1000.c` vs the vendor traces): replaying the
+captured programs reproduces the vendor programming at NM-1000 parity —
+set-params and lamp match exactly, load-calib 0.97 and start 0.98 (differences
+are timing-dependent motor/line-count registers only). The ND motor wait polls
+register 0x41, not the NM-1000's 0x40.
+
+Read/duplex protocol: each `SNCmd(6)` call issues up to two bulk reads from the
+image FIFO (259740 + 251748 bytes at 150 dpi). A **short** bulk read marks the
+end of a side — the front-end call returned 215784 bytes and reported `0x1001`;
+the back end reported `0xe10d`. Register 0x41 bit 0x40 tracks the side
+(`0x8d` front, `0xcd` back), and the driver caches the front image in
+`TopImage.raw` between sides, so one native start covers both sides of a sheet.
+
+Trailing-edge (end-of-paper) detection: deeper dive **still unresolved**, with
+the mechanisms now identified. The generator previously replaced both vendor
+LINCNT writes with the frontend's page height; the vendor actually writes `0`
+first and then a large mode-specific hardware limit (150 dpi `0x69ec` = 27116,
+200 `0x8d58`, 300 `0xd3d8`, 600 `0xd4f0`). `gen_tables_nd.py` now preserves both
+verbatim. With that corrected, a 150 dpi scan still delivers the full read bound
+(1647 lines at 279 mm) and does not latch a paper event; over-provisioning to
+330 mm latches reg 0x40 bit 6 only at ~1948 lines with `0x4b-0x4d = 0x15bb`,
+far beyond the sheet, so it is not a usable page-length signal. The vendor's
+~1600-line crop therefore depends on driver-side timing/setup not reproduced by
+replaying the captured register programs alone. The native core logs the
+candidate registers (reg 0x40 bit 6, `0x4b-0x4d`, `0x92-0x93`) without changing
+the scan length. Practical alternative: crop from content.
+
+Gray captures remain blocked, now root-caused. `SNCmd(0x4)` (load-calib)
+segfaults in the vendor DLL at `0x180016e4e` dereferencing the gray-only
+`LineDark` pointer at `ctx+0x2d8`, which only becomes NULL on some paths. At
+300 dpi it is populated by an earlier `Line`/`OpticalBlack` adapter config, so
+300 gray works; at 150/200/600 the same pointer is NULL. Reproducing that
+requires the `.ds` TWAIN adapter-chaining engine (the harness only replays
+`SNCmd`), so native gray is not reachable this way. The SANE backend offers Gray
+by converting the colour scan instead.
+
+Native image colour is **solved** for 150 dpi colour (validated byte-exact).
+The raw image FIFO is the image but must be repacked. Full FIFO
+(`NEAT_BULK_DIR`) on a 150 dpi colour scan = 13,850,136 bytes; each SNCmd(6)
+frame is **64 lines x 7992 bytes** (511488 B), each 7992-byte line is **6
+sectors of 666 little-endian uint16 samples**, each sector **15 sync + 651 data
+samples**. The six sectors are two 3-sector CIS groups; the front page uses
+**group B (sectors 3-5) = R,G,B**, and **output row r uses raw block r+70**
+(blocks 0-69 warm-up).
+
+Each 16-bit sample carries **two adjacent output pixels, one per byte**. With
+`k = j/3`, phase `j%3`, `Hi(v)=v>>8`, `Lo(v)=v&0xFF`:
+
+| sample | byte | column | byte | column |
+|---|---|---|---|---|
+| `3k+2` | `Hi` | `2k+1`   | `Lo` | `2k+861` |
+| `3k+1` | `Lo` | `2k`     | `Hi` | `2k+431` |
+| `3k+0` | `Lo` | `2k+430` | `Hi` | `2k+860` |
+
+(left `k=0..214`; middle odd `k=0..214`, middle even `k>=1`; right odd
+`k=0..205`, right even `k>=1`). Columns **x=430 and x=860** have no raw source
+and equal the mean of their neighbours. The DLL's `0x180014d50` is a modulo-255
+carry normaliser (magic `0x80808081`) that redistributes the sub-LSB remainder;
+`0x18001abe0` is `memmove`; `0x180011d70` is a 252->256-sample stride repacker
+used only on the 600 dpi branch; `ThreeChannelShift=590/8` is a calibration
+entry count, not a pixel shift. The per-pixel dark/gain stages (`0x180007898`,
+`0x180007f60`) and the `/255` quantizer (`0x180015170`) are **not** applied on
+this path (no gamma either) — the delivered byte is literally `Hi`/`Lo`.
+
+Implemented in `src/nd1000.c` as `nd1000_unpack_150_color()` with a raw-framed
+read path (`nd1000_read_raw()`), used for 150 dpi colour. Regenerated offline
+from the FIFO dump it reproduces `/tmp/opencode/ref-front.pnm` **byte-for-byte
+(6,296,400 / 6,296,400, max error 0)**; test harness
+`/tmp/opencode/unpack_test.c`.
+
+**Generic transform (from DLL disassembly, `re/.../D_findings.md`).** The 150
+formula is a special case of one assembler in `0x18001563d`:
+- 150 dpi: 6 sectors x (15 sync + 651 data), output 1272 wide, warm-up 70.
+- 200 dpi: 6 sectors x (**21 sync + 861 data** = 42 B sync + 1722 B), output
+  1700 wide. Decode window = **first 1718 bytes of the 1722-byte data** (859 of
+  861 samples; last 2 unused). Per channel, per row `r`: `t = r%98`,
+  `rec = 92 + r - r//98`; output column `x` = `data[(3x + b(t)) mod 1718]`, a
+  stride-3 circular read. `b` drifts **-12 B/row = 4 columns/row** and resets
+  every 98 rows; the `x < 4t`
+  columns come from the previous record at `b-42`. Both 3-sector groups image
+  the **same front page**, alternating in **48-row blocks**: group B (sectors
+  3-5) for `t=0..47`, group A (sectors 0-2, horizontally mirrored) for
+  `t=49..96`; rows `t=48,97` are sensor-switch rows. Seams at 573/1146 (B) and
+  551/1124 (A) are neighbour means; the page-edge margin column has no raw
+  source. Measured: **150 exact 1.000000**, **200 0.999100** on non-transition
+  rows (residual = margin column + the 44 switch rows).
+
+Port status: the byte decoder is ported to C (`nd1000_decode_page()` and
+`nd_packs` in `src/nd1000.c`) for **150/200/300/600 front and 300 back**.
+`nd1000_read_all()` captures a pass, then the SANE backend decodes the requested
+side(s); Gray is derived from decoded colour. 150/200/600 **back remain
+unsupported** by the C decoder. Offline comparison against the DLL's *intermediate*
+raster: 150F 1.000000, 300F 0.999608, 300B 0.999238, 600F 0.999626,
+200F 0.989121. At 200 the residual includes 44 sensor-switch rows for which
+the decoder has no samples.
+
+**Final row alignment (previously missing).** The vendor DLL's direct `SNCmd(6)`
+buffer is not a finished, aligned page. A 300 dpi capture of the *same sheet*
+through the vendor harness and native backend produced the same diagonal,
+shredded text, even though both raw streams have identical sector boundaries.
+The apparent 29-vs-30 leading-zero discrepancy is a phase of the sensor data,
+not a dropped sample. Row-wise horizontal displacement remains in *both*
+rasters. Undo it after byte decoding with a cyclic pixel shift:
+
+| dpi / side | horizontal shift per row (positive = right) |
+|---|---|
+| 150 front | none |
+| 200 front | `-4 * (row % 98)`; interpolate the missing rows `row%98 = 48,97` |
+| 300 front | `+4 * (row % 32)` |
+| 300 back | `+4 * (row % 636)` |
+| 600 front | `+12 * (row % 16)` |
+
+At 300 front this reduces adjacent-row mean absolute difference from 9.02 to
+6.63 on the same-sheet vendor image and restores legible text in *both* vendor
+and native previews. 600 front and 300 back likewise become legible. 200 front
+remains visibly imperfect at group switches, even after interpolation.
+`nd1000_realign_page()` implements this as a separate post-decode stage and is
+called before cropping/Gray conversion. An offline C-vs-numpy comparison is
+byte-exact for every supported row-alignment variant.
+
+**Feature parity with upstream `aeroevan/sane-neat` (`neat` backend).** The ND
+backend advertises Color/Gray and 150/200/300/600 dpi; Gray is colour-derived.
+It reports `SANE_STATUS_NO_DOCS` on an empty feeder and provides a udev rule and
+standalone tool. Remaining: validated back-side decoding at 150/200/600,
+*reasonable* 200 dpi switch-row reconstruction (the C path interpolates the
+switch rows, but no raw sample source for them is decoded), geometry options
+(`tl-x/tl-y/br-x/br-y` in mm) and crop, exact trailing-edge detection (currently
+bounded read plus a content-crop heuristic), and cancellation while a blocking
+scan is underway. The default resolution is now 300 dpi; `nd1000-scan` shares
+the whole-pass decoder and rejects unsupported back-side modes before feeding.
+
+The harness/bridge path (running the vendor DLL) remains the fallback.
+
+**Feed-rate bug (fixed).** The first native scan produced the correct page but
+vertically squashed to 939 lines instead of ~1650. Cause: the captured program
+tables replayed only the register *writes*; `gen_tables_nd.py` deliberately
+dropped every `CI` (register read). The vendor DLL's set-params/start phases are
+**writes interleaved with small status reads** (`CI 008e 4022 3`, i.e. poll
+register 0x40) — a write-then-poll handshake on the command register 0x02.
+Firing the `0x02` commands without waiting for the polls made the device miss
+them and feed the paper ~1.8x fast, so the whole page was compressed into ~57%
+of the lines. Fix: `OP_CTRLR` (added to the generator and `run_prog`) replays the
+small (`len <= 8`) `CI 008e` reads at their captured positions; the 64-byte
+config readbacks are still skipped (they time out if replayed at open). With the
+handshake replayed, a 150 dpi ADF-front scan now comes out full height
+(`1272x1614`). See `re/tools/gen_tables_nd.py` and `src/nd1000.c:OP_CTRLR`.
+
+**Trailing over-scan (cropped from content).** The engine runs to the
+programmed height, so after the sheet leaves the CIS the tail rows are dark
+(background). `nd1000_trim_trailing_blank()` now also drops trailing rows with
+no pixel brighter than `ND1000_PAPER_MAX` (128), which removes the dark band
+while leaving a dark-but-real page intact (if the whole image is dark it is left
+unchanged). This is a heuristic; the vendor's hardware page-end signal is still
+not reproduced.
 
 | cmd  | meaning                                          |
 |------|--------------------------------------------------|

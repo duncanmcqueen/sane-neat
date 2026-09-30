@@ -4,31 +4,28 @@ A SANE backend (`neat`) for the **Neat NM-1000 / Neat Receipts mobile scanner**
 (USB `1f44:0001`), so it works with SimpleScan, `scanimage`, XSane and any other
 SANE frontend. It needs no Neat software at runtime.
 
-**ND-1000 (`1f44:0050`):** a separate SANE bridge is available below. The
-original `neat` backend remains NM-1000-only; `build/nd1000-probe` can inspect
-the ND hardware. See [the investigation notes](re/README.md#nd-1000-investigation).
+**ND-1000 (`1f44:0050`):** a separate, fully native SANE backend is available
+below. The original `neat` backend remains NM-1000-only; `build/nd1000-probe`
+can inspect the ND hardware. See [the investigation notes](re/README.md#nd-1000-investigation).
 
-### ND-1000 SANE bridge (experimental)
+### ND-1000 SANE backend (native)
 
-The separate `nd1000` backend supports **duplex RGB ADF**, with selectable
-150, 200, 300 or 600 dpi (150 and 600 dpi tested on paper so far). The scanner
-images both sides in one pass; `--source` selects `ADF Duplex` (default, front
-then back), `ADF Front`, or `ADF Back`. It runs Neat's ND-1000 Windows driver
-DLL through the included `pe-harness` tracer (no Windows VM); the NM-1000
-native driver above remains independent. The DLL is proprietary and is **not**
-included in this repository, so this bridge is a stopgap until the ND-1000
-protocol is fully reversed. Details and limitations are in
-[re/README.md](re/README.md#nd-1000-investigation).
+The `nd1000` backend drives the scanner directly through `src/nd1000.c`,
+replaying register programs captured from Neat's Windows driver; **no vendor
+software is needed at run time**. It decodes Color at 150/200/300/600 dpi on
+the **front** and supports 300 dpi **back/duplex**. Gray is derived from Color.
+The default is 300 dpi ADF Front. At 200 dpi the sensor-switch rows are
+interpolated and some artifacts remain. Other back-side resolutions are not
+yet decoded. The NM-1000 native driver below is independent.
 
 ```sh
-make && make -C re/pe-harness
-# Extract Neat's ND-1000 x64 MSI with 7z (link in re/README.md), then:
-sudo bash packaging/install-nd1000-bridge.sh /path/to/neatadfscanner_x64.dll
+make
+sudo bash packaging/install-nd1000.sh
 # Replug scanner; load one sheet and run:
 scanimage -L
-scanimage -d nd1000:usb:1f44:0050 --format=png -o page.png
-scanimage -d nd1000:usb:1f44:0050 --resolution 600 --format=png -o page-600.png
-scanimage -d nd1000:usb:1f44:0050 --source 'ADF Duplex' --batch='scan-%d.png'
+scanimage -d nd1000:usb:1f44:0050 --source 'ADF Front' --resolution 300 --format=png -o page.png
+scanimage -d nd1000:usb:1f44:0050 --source 'ADF Front' --resolution 600 --format=png -o page-600.png
+scanimage -d nd1000:usb:1f44:0050 --source 'ADF Duplex' --resolution 300 --format=png --batch='scan-%d.png' --batch-count=2
 ```
 
 The installer also enables `saned.socket` (TCP 6566). It allows `127.0.0.1`,
@@ -44,6 +41,16 @@ configuration in `dev-sane/` (net backend pointed at localhost):
 ```sh
 SANE_CONFIG_DIR="$PWD/dev-sane" scanimage -L
 ```
+
+Limitations: the scanner's native gray mode is not available (the vendor DLL
+crashes while capturing it), so `Gray` is produced by converting the colour
+scan. The vendor's trailing-edge end-of-paper registers are not yet decoded:
+the native scan is bounded to the requested height and then uses a content-
+based trailing crop. `SNCmd 0x13` feed/eject is not decoded. The standalone
+`nd1000-scan` tool shares the native full-pass decoder; like the SANE backend,
+it only offers duplex at 300 dpi.
+
+### NM-1000 features
 
 - Colour or gray, 150 / 200 / 300 / 600 dpi, full 8.5" width
 - Each sheet is scanned until its trailing edge passes the sensor, then ejected

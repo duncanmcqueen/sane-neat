@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later WITH SANE-exception
-# Install the ND-1000 SANE bridge and optionally share it over saned.
+# Install the native ND-1000 SANE backend and share it over saned.
 #
-# The bridge runs Neat's ND-1000 Windows driver through the pe-harness tracer,
-# so it needs the DLL extracted from Neat's official ND-1000 driver MSI (see
-# re/README.md). The DLL is not part of this project.
+# The backend links src/nd1000.c and needs no vendor driver at run time.
 #
-# Usage: sudo bash packaging/install-nd1000-bridge.sh /path/to/neatadfscanner_x64.dll
+# Usage: sudo bash packaging/install-nd1000.sh
 #   ND_LAN_CIDR=192.168.1.0/24   subnet allowed to use the shared scanner
 #                                (default: this host's primary LAN network)
 set -euo pipefail
 
-if [[ $EUID -ne 0 || $# -ne 1 ]]; then
-    printf 'Usage: sudo bash %s /path/to/neatadfscanner_x64.dll\n' "$0" >&2
+if [[ $EUID -ne 0 ]]; then
+    printf 'Usage: sudo bash %s\n' "$0" >&2
     exit 2
 fi
-source_dll=$(realpath "$1")
 root=$(dirname "$(dirname "$(realpath "$0")")")
-[[ -f "$source_dll" ]] || { printf 'Missing DLL: %s\n' "$source_dll" >&2; exit 1; }
-[[ -x "$root/re/pe-harness/neatcap" && -f "$root/build/libsane-nd1000.so.1" ]] || {
-    printf 'Build first: make && make -C re/pe-harness\n' >&2
+[[ -f "$root/build/libsane-nd1000.so.1" ]] || {
+    printf 'Build first: make\n' >&2
     exit 1
 }
 
@@ -38,10 +34,13 @@ if [[ -n $lan_cidr ]]; then
     }
 fi
 
-install -Dm755 "$root/build/libsane-nd1000.so.1" /usr/lib/sane/libsane-nd1000.so.1
-ln -sfn libsane-nd1000.so.1 /usr/lib/sane/libsane-nd1000.so
-install -Dm755 "$root/re/pe-harness/neatcap" /usr/local/libexec/neatcap
-install -Dm644 "$source_dll" /usr/local/lib/nd1000/neatadfscanner_x64.dll
+sane_dir=/usr/lib/sane
+[[ -d /usr/lib64/sane ]] && sane_dir=/usr/lib64/sane
+install -Dm755 "$root/build/libsane-nd1000.so.1" "$sane_dir/libsane-nd1000.so.1"
+ln -sfn libsane-nd1000.so.1 "$sane_dir/libsane-nd1000.so"
+if [[ -x "$root/build/nd1000-scan" ]]; then
+    install -Dm755 "$root/build/nd1000-scan" /usr/local/bin/nd1000-scan
+fi
 install -Dm644 "$root/packaging/dll.d-nd1000" /etc/sane.d/dll.d/nd1000
 install -Dm644 "$root/udev/64-neat-nd1000.rules" /etc/udev/rules.d/64-neat-nd1000.rules
 udevadm control --reload-rules
@@ -53,7 +52,7 @@ for subnet in 127.0.0.1 100.64.0.0/10 ${lan_cidr:+$lan_cidr}; do
 done
 systemctl enable --now saned.socket
 
-printf '\nInstalled ND-1000 bridge. Replug the scanner for the udev rule.\n'
+printf '\nInstalled native ND-1000 backend. Replug the scanner for the udev rule.\n'
 printf 'Local check: scanimage -L\n'
 printf 'Remote clients: add this host (LAN or Tailscale IP) to /etc/sane.d/net.conf.\n'
 if [[ -n $lan_cidr ]]; then

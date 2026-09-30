@@ -584,7 +584,11 @@ static WINAPI BOOL s_SHGetSpecialFolderPathA(HANDLE hwnd, char *out, int csidl, 
 static WINAPI DWORD k_GetModuleFileNameA(HANDLE mod, char *out, DWORD n)
 {
     (void)mod;
-    snprintf(out, n, "C:\\Windows\\twain_32\\Neat Mobile Scanner\\NeatMobileScanner32.dll");
+    if (!n || !out)
+        return 0;
+    snprintf(out, n, "%s", usb_pid == 0x0050
+             ? "C:\\Windows\\twain_32\\Neat ADF Scanner\\NeatADFScanner32.dll"
+             : "C:\\Windows\\twain_32\\Neat Mobile Scanner\\NeatMobileScanner32.dll");
     return strlen(out);
 }
 
