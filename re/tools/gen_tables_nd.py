@@ -164,6 +164,11 @@ def main():
     scan150 = os.path.join(scandir, 'scan_150_24.log')
     print(c_array('prog_lamp_on', encode(maybe(scan150, 'lamp'))))
     print(c_array('prog_stop', encode(maybe(scan150, 'stop'))))
+    # Feed/grab: a single SNCmd(0x13) call captured via neatcap's raw path
+    # (NEAT_ND_RAW=1). The program is fixed; the p6 step argument does not
+    # change the USB stream (p6=300 and p6=1000 captures were identical), and
+    # the 510-byte bulk-out is the motor microstep profile.
+    print(c_array('prog_feed', encode(maybe(os.path.join(progdir, 'feed.log'), 'raw'))))
     print()
 
     entries = []

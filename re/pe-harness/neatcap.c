@@ -291,8 +291,10 @@ int main(int argc, char **argv)
         }
         nd_method = (uint32_t)method;
     }
+    const char *nd_raw = getenv("NEAT_ND_RAW");
     if (nd1000 && (!strcmp(argv[2], "feed") || !strcmp(argv[2], "calibrate") ||
-                   !strcmp(argv[2], "raw"))) {
+                   (!strcmp(argv[2], "raw") &&
+                    !(nd_raw && !strcmp(nd_raw, "1"))))) {
         fprintf(stderr, "ND feed/calibration/raw commands need ND-specific argument mapping\n");
         return 2;
     }

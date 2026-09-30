@@ -112,7 +112,9 @@ int nd1000_read(struct nd1000 *dev, uint8_t *buf, int max_lines, int *lines);
 /* Finish or abort a scan. */
 int nd1000_finish(struct nd1000 *dev);
 
-/* Move the paper by `steps` motor steps (not yet implemented). */
+/* Move the paper by replaying the captured SNCmd(0x13) feed program `steps`
+ * times (1..64). The vendor's step argument is ignored; each replay runs two
+ * fixed microstep moves in the feed/grab (inward) direction. */
 int nd1000_feed(struct nd1000 *dev, int steps);
 
 #endif

@@ -82,9 +82,11 @@ images **both sides in one pass**: reads return full lines for the front until
 status `0x1001`, then full lines for the back until `0xe10d`. At 150 dpi each
 side is `1272x1600` RGB. The harness `duplex RES BPP FRONT BACK` action captures
 both sides; `src/sane-nd1000.c` serves them as two SANE pages through the
-native core and exposes `ADF Front` / `ADF Back` / `ADF Duplex`. The NM-style
-eject (`0x13`) expects additional ND-specific arguments, so the harness does
-**not** attempt ND ejection.
+native core and exposes `ADF Front` / `ADF Back` / `ADF Duplex`. On the ND,
+`SNCmd(0x13)` is the feed/grab direction: the captured program is fixed (the
+`p6` argument is ignored) and drives the motor inward, so it is not an eject.
+The harness raw path (`NEAT_ND_RAW=1`) exposes `0x13` for capture, and
+`nd1000_feed()` replays the captured program natively.
 
 Native core validation (`src/nd1000.c` vs the vendor traces): replaying the
 captured programs reproduces the vendor programming at NM-1000 parity —
@@ -257,7 +259,7 @@ not reproduced.
 | 7    | stop                                             |
 | 9    | lamp on/off (`p5`)                               |
 | 0x10 | buttons                                          |
-| 0x13 | feed `p6` motor steps                            |
+| 0x13 | feed/grab (fixed program, `p6` ignored; inward)  |
 | 0x16 | paper present? (NM: 0 = yes; ND: 1 = yes, 0xe107 = empty)  |
 
 ## pe-harness

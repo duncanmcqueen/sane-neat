@@ -47,8 +47,9 @@ crashes while capturing it), so `Gray` is produced by converting the colour
 scan. The vendor's trailing-edge end-of-paper registers are not yet decoded:
 the native scan always runs the full page height (so the sheet is ejected)
 and then uses a content-based trailing crop; the requested scan area is
-cropped from that. `SNCmd 0x13`
-feed/eject is not decoded. The standalone `nd1000-scan` tool shares the native
+cropped from that. `SNCmd 0x13` is decoded as the inward feed/grab move; there
+is no eject command yet, so a cancelled scan still leaves the sheet in the
+feeder for manual removal. The standalone `nd1000-scan` tool shares the native
 full-pass decoder; like the SANE backend, it only offers duplex at 300 dpi.
 
 ### NM-1000 features

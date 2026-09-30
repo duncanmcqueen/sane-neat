@@ -1197,13 +1197,25 @@ int nd1000_read(struct nd1000 *d, uint8_t *buf, int max_lines, int *lines)
     return ND1000_OK;
 }
 
-/* TODO(nd1000): SNcmd 0x13 (feed/motor steps) arguments are not decoded, so
- * eject and multi-sheet feeding are not implemented in the native core yet. */
+/* Advance the paper by replaying the captured SNCmd(0x13) program `steps`
+ * times. Each replay runs two fixed microstep moves. The vendor ignores the
+ * step argument (the capture is identical for p6=300 and p6=1000). This is the
+ * feed/grab direction: it pulls a sheet into the machine, not out. */
 int nd1000_feed(struct nd1000 *d, int steps)
 {
-    (void)d;
-    (void)steps;
-    return ND1000_ERR_INVAL;
+    struct prog_ctx ctx = {0};
+    if (steps <= 0 || steps > 64)
+        return ND1000_ERR_INVAL;
+    if (d->scanning)
+        return ND1000_ERR_BUSY;
+    if (prog_feed[0] == OP_END)
+        return ND1000_ERR_INVAL; /* empty program (feed.log missing at build) */
+    for (int i = 0; i < steps; i++) {
+        int r = run_prog(d, prog_feed, &ctx);
+        if (r)
+            return r;
+    }
+    return ND1000_OK;
 }
 
 int nd1000_finish(struct nd1000 *d)
