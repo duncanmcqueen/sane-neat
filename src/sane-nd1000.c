@@ -217,14 +217,10 @@ static SANE_Status acquire(struct nd_scanner *s)
         return r == 0 ? SANE_STATUS_NO_DOCS : SANE_STATUS_IO_ERROR;
     }
     nd1000_set_duplex(s->dev, s->source == SRC_DUPLEX);
-    /* Program and bound the drain to the requested page height, so the motor
-     * stops after the area the frontend asked for instead of the full 279 mm.
-     * nd1000_read_all adds a 512-record margin that covers the warm-up header
-     * (rec0) and skipped records, so a few extra mm is enough. */
-    int scan_mm = (int)(SANE_UNFIX(s->br_y) + 6.5);
-    if (scan_mm > MAX_HEIGHT_MM)
-        scan_mm = MAX_HEIGHT_MM;
-    r = nd1000_start(s->dev, s->resolution, scan_mm, &info);
+    /* Always scan the full page height. Stopping the motor early to save time
+     * leaves the sheet mid-feeder, because eject (SNCmd 0x13) is not decoded
+     * yet; revisit this once feed/eject works. */
+    r = nd1000_start(s->dev, s->resolution, MAX_HEIGHT_MM, &info);
     if (r) {
         nd1000_close(s->dev);
         s->dev = NULL;
