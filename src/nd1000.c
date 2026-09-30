@@ -946,6 +946,20 @@ int nd1000_realign_page(int dpi, int side, uint8_t *rgb, int width, int height)
         memcpy(row, rowbuf, bpl);
     }
     free(rowbuf);
+
+    /* The 200 dpi dual-array mode leaves a dark array-switch line every 98
+     * rows (the vendor capture has them too). Smooth each switch row from its
+     * neighbours so the page has no visible horizontal band. */
+    if (dpi == 200) {
+        for (int y = 1; y + 1 < height; y++) {
+            if (y % period != 48 && y % period != 97)
+                continue;
+            uint8_t *row = rgb + (size_t)y * bpl;
+            const uint8_t *prev = row - bpl, *next = row + bpl;
+            for (size_t i = 0; i < bpl; i++)
+                row[i] = (uint8_t)(((unsigned)prev[i] + next[i]) / 2);
+        }
+    }
     return ND1000_OK;
 }
 

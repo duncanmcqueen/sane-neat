@@ -212,14 +212,14 @@ It reports `SANE_STATUS_NO_DOCS` on an empty feeder and provides a udev rule and
 standalone tool. Remaining: validated back-side decoding at 150/200/600, exact
 trailing-edge detection (currently bounded read plus a content-crop heuristic),
 and cancellation while a blocking scan is underway. The 200 dpi array-switch
-rows (t=48 and t=97 in each 98-line block) are now decoded with their group's
-window formula truncated to the wedge (the first 192 columns valid, the rest
-black), so they deskew with the rest of the page; this matches the deskewed
-vendor capture at 0.9991 (was 0.989 with zeroed rows plus a post-shift
-interpolation). Geometry options (`tl-x/tl-y/br-x/br-y` in mm) and window
-cropping are implemented; the default resolution is now 300 dpi. `nd1000-scan`
-shares the whole-pass decoder and rejects unsupported back-side modes before
-feeding.
+rows (t=48 and t=97 in each 98-line block) are decoded with their group's
+window formula truncated to the wedge (the first 192 columns) and then smoothed
+from the neighbouring lines after deskew, so the page has no dark horizontal
+band; the vendor capture instead keeps the dark switch line (matching it
+exactly scores 0.999, smoothing it trades that for a clean image). Geometry
+options (`tl-x/tl-y/br-x/br-y` in mm) and window cropping are implemented; the
+default resolution is now 300 dpi. `nd1000-scan` shares the whole-pass decoder
+and rejects unsupported back-side modes before feeding.
 
 The harness/bridge path (running the vendor DLL) remains the fallback.
 
