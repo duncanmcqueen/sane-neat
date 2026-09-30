@@ -813,7 +813,7 @@ static void nd_200_row(const uint8_t *raw, size_t nrec, uint8_t *outrow, int r,
     long rec = 92 + r - r / 98;
     uint8_t p[1700];
     for (int ch = 0; ch < 3; ch++) {
-        if (t <= 47) { /* group B, sectors 3-5 */
+        if (t <= 48) { /* group B (sectors 3-5); t=48 is the B->A switch row */
             int b = pmod(1717 - 12 * t, MP);
             nd_get_sec(raw, nrec, rec, sector, 3 + ch, sync, cur);
             nd_get_sec(raw, nrec, rec - 1, sector, 3 + ch, sync, prv);
@@ -828,7 +828,10 @@ static void nd_200_row(const uint8_t *raw, size_t nrec, uint8_t *outrow, int r,
                     p[seams[s]] = (uint8_t)((p[seams[s] - 1] + p[seams[s] + 1]) / 2);
             if (t == 0)
                 p[0] = 0;
-        } else if (t >= 49) { /* group A, sectors 0-2, mirrored */
+            /* The switch row is valid only over its wedge; black the rest. */
+            if (t == 48 && we < W)
+                memset(p + we, 0, (size_t)(W - we));
+        } else if (t >= 49) { /* group A, sectors 0-2, mirrored; t=97 is A->B */
             int b = pmod(1066 + 12 * t, MP);
             nd_get_sec(raw, nrec, rec, sector, 0 + ch, sync, cur);
             nd_get_sec(raw, nrec, rec - 1, sector, 0 + ch, sync, prv);
@@ -844,7 +847,9 @@ static void nd_200_row(const uint8_t *raw, size_t nrec, uint8_t *outrow, int r,
             for (int s = 0; s < 2; s++)
                 if (seams[s] >= 1 && seams[s] < W - 1)
                     p[seams[s]] = (uint8_t)((p[seams[s] - 1] + p[seams[s] + 1]) / 2);
-        } else { /* sensor-switch rows */
+            if (t == 97 && we < W)
+                memset(p + we, 0, (size_t)(W - we));
+        } else { /* unreachable; kept for safety */
             memset(p, 0, W);
         }
         for (int x = 0; x < W; x++)
@@ -912,6 +917,7 @@ int nd1000_realign_page(int dpi, int side, uint8_t *rgb, int width, int height)
     if (!rgb || width <= 0 || height < 0 ||
         width != (((long long)dpi * 85 / 10) & ~3LL) || (size_t)width > SIZE_MAX / 3)
         return ND1000_ERR_INVAL;
+    bpl = (size_t)width * 3;
     if (dpi == 150 && side == 0)
         return ND1000_OK;
     if (dpi == 200 && side == 0) {
@@ -925,7 +931,6 @@ int nd1000_realign_page(int dpi, int side, uint8_t *rgb, int width, int height)
     } else {
         return ND1000_ERR_INVAL;
     }
-    bpl = (size_t)width * 3;
     rowbuf = malloc(bpl);
     if (!rowbuf)
         return ND1000_ERR_NOMEM;
@@ -941,20 +946,6 @@ int nd1000_realign_page(int dpi, int side, uint8_t *rgb, int width, int height)
         memcpy(row, rowbuf, bpl);
     }
     free(rowbuf);
-
-    /* The 200 dpi raw decoder has no sample source for either array-switch
-     * row. Interpolate each missing row after alignment instead of leaving a
-     * black horizontal stripe every 48-49 rows. */
-    if (dpi == 200) {
-        for (int y = 1; y + 1 < height; y++) {
-            if (y % period != 48 && y % period != 97)
-                continue;
-            uint8_t *row = rgb + (size_t)y * bpl;
-            const uint8_t *prev = row - bpl, *next = row + bpl;
-            for (size_t i = 0; i < bpl; i++)
-                row[i] = (uint8_t)(((unsigned)prev[i] + next[i]) / 2);
-        }
-    }
     return ND1000_OK;
 }
 
