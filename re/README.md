@@ -211,11 +211,12 @@ backend advertises Color/Gray and 150/200/300/600 dpi; Gray is colour-derived.
 It reports `SANE_STATUS_NO_DOCS` on an empty feeder and provides a udev rule and
 standalone tool. Remaining: validated back-side decoding at 150/200/600,
 *reasonable* 200 dpi switch-row reconstruction (the C path interpolates the
-switch rows, but no raw sample source for them is decoded), geometry options
-(`tl-x/tl-y/br-x/br-y` in mm) and crop, exact trailing-edge detection (currently
-bounded read plus a content-crop heuristic), and cancellation while a blocking
-scan is underway. The default resolution is now 300 dpi; `nd1000-scan` shares
-the whole-pass decoder and rejects unsupported back-side modes before feeding.
+switch rows, but no raw sample source for them is decoded), exact
+trailing-edge detection (currently bounded read plus a content-crop heuristic),
+and cancellation while a blocking scan is underway. Geometry options
+(`tl-x/tl-y/br-x/br-y` in mm) and window cropping are implemented; the default
+resolution is now 300 dpi. `nd1000-scan` shares the whole-pass decoder and
+rejects unsupported back-side modes before feeding.
 
 The harness/bridge path (running the vendor DLL) remains the fallback.
 

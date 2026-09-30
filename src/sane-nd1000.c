@@ -21,8 +21,11 @@
 
 #define EXPORT __attribute__((visibility("default")))
 #define MAX_HEIGHT_MM 279
+#define MAX_WIDTH_MM 215.9
+#define MM_PER_INCH 25.4
 
-enum { OPT_COUNT, OPT_MODE, OPT_RESOLUTION, OPT_SOURCE, NUM_OPTIONS };
+enum { OPT_COUNT, OPT_MODE, OPT_RESOLUTION, OPT_SOURCE,
+       OPT_TL_X, OPT_TL_Y, OPT_BR_X, OPT_BR_Y, NUM_OPTIONS };
 enum { SRC_FRONT, SRC_BACK, SRC_DUPLEX };
 
 struct nd_scanner {
@@ -36,6 +39,7 @@ struct nd_scanner {
     int back_lines;
     int have_back;
     SANE_Word resolution;
+    SANE_Fixed tl_x, tl_y, br_x, br_y;
     int source;
     int gray;
     int started;
@@ -51,6 +55,8 @@ static const SANE_String_Const modes[] = {"Color", "Gray", NULL};
 static const SANE_String_Const sources[] = {"ADF Front", "ADF Back", "ADF Duplex", NULL};
 static const SANE_String_Const front_source[] = {"ADF Front", NULL};
 static const SANE_Word resolutions[] = {4, 150, 200, 300, 600};
+static const SANE_Range x_range = {SANE_FIX(0), SANE_FIX(MAX_WIDTH_MM), 0};
+static const SANE_Range y_range = {SANE_FIX(0), SANE_FIX(MAX_HEIGHT_MM), 0};
 
 static void core_log(int level, const char *msg)
 {
@@ -58,14 +64,48 @@ static void core_log(int level, const char *msg)
         fprintf(stderr, "[nd1000] %s\n", msg);
 }
 
+static int mm_to_px(SANE_Fixed mm, int dpi)
+{
+    return (int)(SANE_UNFIX(mm) * dpi / MM_PER_INCH + 0.5);
+}
+
+/* Column window inside the sensor line. */
+static void window(struct nd_scanner *s, int sensor_px, int *x0, int *x1)
+{
+    *x0 = mm_to_px(s->tl_x, s->resolution);
+    *x1 = mm_to_px(s->br_x, s->resolution);
+    if (*x1 > sensor_px)
+        *x1 = sensor_px;
+    if (*x0 > *x1 - 1)
+        *x0 = *x1 - 1;
+    if (*x0 < 0)
+        *x0 = 0;
+}
+
+/* Crop an RGB page in place to [x0,x1) x [y0,y1). Returns the new line count. */
+static int crop_page(unsigned char *buf, int width, int lines,
+                     int x0, int x1, int y0, int y1)
+{
+    int cw = x1 - x0, ch = y1 - y0;
+    if (x0 < 0 || y0 < 0 || cw <= 0 || ch <= 0 || x1 > width || y1 > lines)
+        return -1;
+    for (int y = 0; y < ch; y++)
+        memmove(buf + (size_t)y * cw * 3,
+                buf + (size_t)(y0 + y) * width * 3 + (size_t)x0 * 3,
+                (size_t)cw * 3);
+    return ch;
+}
+
 static void update_geometry(struct nd_scanner *s)
 {
     /* The native core reports exact geometry per page in sane_start(); this
      * is only a pre-start estimate for sane_get_parameters(). */
+    int x0, x1;
+    window(s, (s->resolution * 85 / 10) & ~3, &x0, &x1);
     s->params.format = s->gray ? SANE_FRAME_GRAY : SANE_FRAME_RGB;
     s->params.last_frame = SANE_TRUE;
     s->params.depth = 8;
-    s->params.pixels_per_line = (s->resolution * 85 / 10) & ~3;
+    s->params.pixels_per_line = x1 - x0;
     s->params.bytes_per_line = s->params.pixels_per_line * (s->gray ? 1 : 3);
     s->params.lines = -1;
 }
@@ -110,8 +150,36 @@ static void init_options(struct nd_scanner *s)
     o[OPT_SOURCE].size = 16;
     o[OPT_SOURCE].cap = SANE_CAP_SOFT_DETECT | SANE_CAP_SOFT_SELECT;
     o[OPT_SOURCE].constraint_type = SANE_CONSTRAINT_STRING_LIST;
+    {
+        static const struct {
+            int idx;
+            const char *name, *title, *desc;
+            const SANE_Range *range;
+        } geo[] = {
+            {OPT_TL_X, "tl-x", "Top-left x", "Top-left x position of scan area.", &x_range},
+            {OPT_TL_Y, "tl-y", "Top-left y", "Top-left y position of scan area.", &y_range},
+            {OPT_BR_X, "br-x", "Bottom-right x", "Bottom-right x position of scan area.", &x_range},
+            {OPT_BR_Y, "br-y", "Bottom-right y",
+             "Bottom-right y position of scan area.", &y_range},
+        };
+        for (size_t i = 0; i < sizeof(geo) / sizeof(geo[0]); i++) {
+            SANE_Option_Descriptor *g = &o[geo[i].idx];
+            g->name = geo[i].name;
+            g->title = geo[i].title;
+            g->desc = geo[i].desc;
+            g->type = SANE_TYPE_FIXED;
+            g->unit = SANE_UNIT_MM;
+            g->size = sizeof(SANE_Fixed);
+            g->cap = SANE_CAP_SOFT_DETECT | SANE_CAP_SOFT_SELECT;
+            g->constraint_type = SANE_CONSTRAINT_RANGE;
+            g->constraint.range = geo[i].range;
+        }
+    }
     s->resolution = 300;
     s->source = SRC_FRONT;
+    s->tl_x = s->tl_y = 0;
+    s->br_x = SANE_FIX(MAX_WIDTH_MM);
+    s->br_y = SANE_FIX(MAX_HEIGHT_MM);
     update_source_constraint(s);
     update_geometry(s);
 }
@@ -204,6 +272,41 @@ static SANE_Status acquire(struct nd_scanner *s)
         }
     }
     free(raw);
+    /* Crop to the requested window. Defaults cover the full sensor. */
+    {
+        int x0, x1;
+        window(s, W, &x0, &x1);
+        int cw = x1 - x0;
+        if (front) {
+            int y0 = mm_to_px(s->tl_y, s->resolution);
+            int y1 = mm_to_px(s->br_y, s->resolution);
+            if (y1 > Hf)
+                y1 = Hf;
+            if (y0 > y1)
+                y0 = y1;
+            int ch = crop_page(front, W, Hf, x0, x1, y0, y1);
+            if (ch <= 0) {
+                free(front); free(back);
+                return SANE_STATUS_IO_ERROR;
+            }
+            Hf = ch;
+        }
+        if (back) {
+            int y0 = mm_to_px(s->tl_y, s->resolution);
+            int y1 = mm_to_px(s->br_y, s->resolution);
+            if (y1 > Hb)
+                y1 = Hb;
+            if (y0 > y1)
+                y0 = y1;
+            int ch = crop_page(back, W, Hb, x0, x1, y0, y1);
+            if (ch <= 0) {
+                free(front); free(back);
+                return SANE_STATUS_IO_ERROR;
+            }
+            Hb = ch;
+        }
+        W = cw;
+    }
     if ((s->source != SRC_BACK && (!front || Hf <= 0)) ||
         (s->source != SRC_FRONT && (!back || Hb <= 0))) {
         free(front); free(back);
@@ -328,10 +431,37 @@ EXPORT SANE_Status sane_nd1000_control_option(SANE_Handle handle, SANE_Int n, SA
         if (n == OPT_SOURCE)
             strcpy(value, s->source == SRC_FRONT ? "ADF Front" :
                           s->source == SRC_BACK ? "ADF Back" : "ADF Duplex");
+        if (n == OPT_TL_X) *(SANE_Fixed *)value = s->tl_x;
+        if (n == OPT_TL_Y) *(SANE_Fixed *)value = s->tl_y;
+        if (n == OPT_BR_X) *(SANE_Fixed *)value = s->br_x;
+        if (n == OPT_BR_Y) *(SANE_Fixed *)value = s->br_y;
         return SANE_STATUS_GOOD;
     }
     if (action != SANE_ACTION_SET_VALUE || n == OPT_COUNT || s->started)
         return SANE_STATUS_INVAL;
+    if (n == OPT_TL_X || n == OPT_TL_Y || n == OPT_BR_X || n == OPT_BR_Y) {
+        SANE_Fixed v = *(SANE_Fixed *)value;
+        const SANE_Range *rn = s->options[n].constraint.range;
+        SANE_Fixed *slot = n == OPT_TL_X ? &s->tl_x : n == OPT_TL_Y ? &s->tl_y
+                          : n == OPT_BR_X ? &s->br_x : &s->br_y;
+        if (v < rn->min)
+            v = rn->min;
+        if (v > rn->max)
+            v = rn->max;
+        if (v != *(SANE_Fixed *)value) {
+            *(SANE_Fixed *)value = v;
+            if (info) *info |= SANE_INFO_INEXACT;
+        }
+        /* A no-op SET must keep a buffered duplex back side. */
+        if (v == *slot)
+            return SANE_STATUS_GOOD;
+        *slot = v;
+        free(s->back); s->back = NULL; s->back_length = 0; s->back_lines = 0;
+        s->have_back = 0;
+        update_geometry(s);
+        if (info) *info |= SANE_INFO_RELOAD_PARAMS;
+        return SANE_STATUS_GOOD;
+    }
     if (n == OPT_MODE) {
         int gray;
         if (!strcmp(value, "Color")) gray = 0;
@@ -387,6 +517,8 @@ EXPORT SANE_Status sane_nd1000_start(SANE_Handle handle)
     struct nd_scanner *s = handle;
     if (s->source != SRC_FRONT && s->resolution != 300)
         return SANE_STATUS_UNSUPPORTED;
+    if (s->br_x <= s->tl_x || s->br_y <= s->tl_y)
+        return SANE_STATUS_INVAL;
     free(s->page); s->page = NULL;
     s->length = s->offset = 0; s->started = 0; s->params.lines = -1;
     /* Serve a buffered back side from the previous duplex pass. */
