@@ -88,8 +88,9 @@ int nd1000_decode_height(int dpi, int side, size_t nbytes);
  * nd1000_set_cancel) reports cancellation while draining. */
 int nd1000_read_all(struct nd1000 *dev, uint8_t **raw, size_t *len);
 
-/* Install a callback polled between drain chunks; a nonzero return aborts the
- * current nd1000_read_all with ND1000_ERR_CANCELLED. Pass NULL to clear. */
+/* Install a callback polled between drain chunks; a nonzero return marks the
+ * drain cancelled. The drain still runs to its bound so the sheet is ejected,
+ * and nd1000_read_all then returns ND1000_ERR_CANCELLED. Pass NULL to clear. */
 void nd1000_set_cancel(struct nd1000 *dev, int (*cb)(void *ref), void *ref);
 
 int nd1000_start(struct nd1000 *dev, int dpi, int max_height_mm, struct nd1000_scan_info *info);

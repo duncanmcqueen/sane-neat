@@ -214,7 +214,10 @@ It reports `SANE_STATUS_NO_DOCS` on an empty feeder and provides a udev rule and
 standalone tool. Remaining: validated back-side decoding at 150/200/600 and
 exact trailing-edge detection (currently bounded read plus a content-crop
 heuristic). A running scan can be cancelled: `sane_cancel` sets an atomic flag
-that the drain loop polls. The 200 dpi array-switch
+the drain loop polls. Because `SNCmd(0x13)` only feeds inward (it is not an
+eject), a cancel does not stop the motor; the drain finishes and discards the
+rest of the image so the sheet is ejected, then returns `SANE_STATUS_CANCELLED`.
+The 200 dpi array-switch
 rows (t=48 and t=97 in each 98-line block) are decoded with their group's
 window formula truncated to the wedge (the first 192 columns) and then smoothed
 from the neighbouring lines after deskew, so the page has no dark horizontal

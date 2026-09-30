@@ -71,7 +71,9 @@ struct nd1000 {
     int side;         /* 0 front, 1 back */
     int sides;        /* 1 simplex, 2 duplex */
     int edge_seen;    /* diagnostic: paper sensor event latched */
-    int (*cancelled)(void *ref); /* polled while draining; nonzero aborts */
+    int (*cancelled)(void *ref); /* polled while draining; nonzero cancels
+                                  * (the drain still completes so the sheet
+                                  * ejects) */
     void *cancel_ref;
 };
 
@@ -1018,47 +1020,71 @@ int nd1000_read_all(struct nd1000 *d, uint8_t **raw, size_t *len)
     size_t maxbytes = 0;
     if (d->raw_reclen > 0 && d->lines_max > 0)
         maxbytes = (size_t)(d->lines_max + 512) * d->raw_reclen;
+    /* On cancel we do not abort the motor (that leaves the sheet mid-feeder
+     * and SNCmd 0x13 only feeds inward). Instead keep draining to the same
+     * bound, discarding the data, so the pass completes and the sheet ejects;
+     * the caller still gets ND1000_ERR_CANCELLED. */
+    uint32_t want = 131072u;
+    uint8_t *discard = malloc(want);
+    if (!discard) {
+        free(buf);
+        return ND1000_ERR_NOMEM;
+    }
+    int cancelled = 0;
+    size_t drained = 0;   /* bytes read from the FIFO, stored or not */
     for (;;) {
-        if (d->cancelled && d->cancelled(d->cancel_ref)) {
-            free(buf);
-            return ND1000_ERR_CANCELLED;
-        }
-        size_t headroom = (size_t)(1u << 20);
-        if ((size_t)d->raw_bpl > headroom)
-            headroom = (size_t)d->raw_bpl;
-        if (cap - used < headroom) {
-            size_t ncap = cap * 2 + headroom;
-            uint8_t *nb = realloc(buf, ncap);
-            if (!nb) { free(buf); return ND1000_ERR_NOMEM; }
-            buf = nb; cap = ncap;
+        if (!cancelled && d->cancelled && d->cancelled(d->cancel_ref))
+            cancelled = 1;
+        if (!cancelled) {
+            size_t headroom = (size_t)(1u << 20);
+            if ((size_t)d->raw_bpl > headroom)
+                headroom = (size_t)d->raw_bpl;
+            if (cap - used < headroom) {
+                size_t ncap = cap * 2 + headroom;
+                uint8_t *nb = realloc(buf, ncap);
+                if (!nb) { free(discard); free(buf); return ND1000_ERR_NOMEM; }
+                buf = nb; cap = ncap;
+            }
         }
         int got = 0;
         /* The device fills the requested length until the sheet ends; the
          * final transfer is short. Never issue a read with no data behind it
          * (it locks the ASIC). A quantum below the vendor's ~250 KiB avoids
          * requesting more than is buffered while still ending on a short read. */
-        uint32_t want = 131072u;
-        int r = bulk_read_avail(d, SCAN_FIFO, buf + used, want, &got);
-        if (r) { free(buf); return r; }
+        uint8_t *dst = cancelled ? discard : buf + used;
+        int r = bulk_read_avail(d, SCAN_FIFO, dst, want, &got);
+        if (r) { free(discard); free(buf); return r; }
         if (got <= 0) {
             /* A zero-length read is not a verified end-of-sheet marker on
-             * this ASIC. Report an incomplete pass and let finish stop it. */
+             * this ASIC. Report an incomplete pass and let finish stop it,
+             * but a pending cancel must still surface as cancelled. */
+            free(discard);
             free(buf);
-            return used ? ND1000_ERR_IO : ND1000_ERR_NOPAPER;
+            if (cancelled)
+                return ND1000_ERR_CANCELLED;
+            return drained ? ND1000_ERR_IO : ND1000_ERR_NOPAPER;
         }
-        if (d->bulk)
-            fwrite(buf + used, 1, (size_t)got, d->bulk);
-        used += (size_t)got;
+        drained += (size_t)got;
+        if (!cancelled) {
+            if (d->bulk)
+                fwrite(buf + used, 1, (size_t)got, d->bulk);
+            used += (size_t)got;
+        }
         d->data_seen = 1;
         if ((uint32_t)got < want)
             break;   /* short transfer = end of sheet */
-        if (maxbytes && used >= maxbytes)
-            break;
+        if (maxbytes && drained >= maxbytes)
+            break;   /* bound on bytes drained, stored or not */
     }
+    free(discard);
     d->rawfill = 0;
-    if (used == 0) {
+    if (drained == 0) {
         free(buf);
         return d->data_seen ? ND1000_EOF : ND1000_ERR_NOPAPER;
+    }
+    if (cancelled) {
+        free(buf);
+        return ND1000_ERR_CANCELLED;
     }
     *raw = buf;
     *len = used;
