@@ -83,8 +83,14 @@ int nd1000_realign_page(int dpi, int side, uint8_t *rgb, int width, int height);
 int nd1000_decode_height(int dpi, int side, size_t nbytes);
 
 /* Drain the whole image FIFO for one physical pass into a malloc'd buffer
- * (all sides are carried in the same record stream). Caller frees *raw. */
+ * (all sides are carried in the same record stream). Caller frees *raw.
+ * Returns ND1000_ERR_CANCELLED if the optional cancel callback (set with
+ * nd1000_set_cancel) reports cancellation while draining. */
 int nd1000_read_all(struct nd1000 *dev, uint8_t **raw, size_t *len);
+
+/* Install a callback polled between drain chunks; a nonzero return aborts the
+ * current nd1000_read_all with ND1000_ERR_CANCELLED. Pass NULL to clear. */
+void nd1000_set_cancel(struct nd1000 *dev, int (*cb)(void *ref), void *ref);
 
 int nd1000_start(struct nd1000 *dev, int dpi, int max_height_mm, struct nd1000_scan_info *info);
 

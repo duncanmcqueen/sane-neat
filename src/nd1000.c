@@ -71,6 +71,8 @@ struct nd1000 {
     int side;         /* 0 front, 1 back */
     int sides;        /* 1 simplex, 2 duplex */
     int edge_seen;    /* diagnostic: paper sensor event latched */
+    int (*cancelled)(void *ref); /* polled while draining; nonzero aborts */
+    void *cancel_ref;
 };
 
 static nd1000_log_fn log_fn;
@@ -988,6 +990,12 @@ int nd1000_decode_height(int dpi, int side, size_t nbytes)
     return h;
 }
 
+void nd1000_set_cancel(struct nd1000 *d, int (*cb)(void *ref), void *ref)
+{
+    d->cancelled = cb;
+    d->cancel_ref = ref;
+}
+
 /* Drain the whole image FIFO for one physical pass. All sides of a sheet are
  * carried in the same record stream, so this stops only when the device has
  * no more data (short/zero bulk read). */
@@ -1011,6 +1019,10 @@ int nd1000_read_all(struct nd1000 *d, uint8_t **raw, size_t *len)
     if (d->raw_reclen > 0 && d->lines_max > 0)
         maxbytes = (size_t)(d->lines_max + 512) * d->raw_reclen;
     for (;;) {
+        if (d->cancelled && d->cancelled(d->cancel_ref)) {
+            free(buf);
+            return ND1000_ERR_CANCELLED;
+        }
         size_t headroom = (size_t)(1u << 20);
         if ((size_t)d->raw_bpl > headroom)
             headroom = (size_t)d->raw_bpl;

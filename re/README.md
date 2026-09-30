@@ -209,9 +209,10 @@ byte-exact for every supported row-alignment variant.
 **Feature parity with upstream `aeroevan/sane-neat` (`neat` backend).** The ND
 backend advertises Color/Gray and 150/200/300/600 dpi; Gray is colour-derived.
 It reports `SANE_STATUS_NO_DOCS` on an empty feeder and provides a udev rule and
-standalone tool. Remaining: validated back-side decoding at 150/200/600, exact
-trailing-edge detection (currently bounded read plus a content-crop heuristic),
-and cancellation while a blocking scan is underway. The 200 dpi array-switch
+standalone tool. Remaining: validated back-side decoding at 150/200/600 and
+exact trailing-edge detection (currently bounded read plus a content-crop
+heuristic). A running scan can be cancelled: `sane_cancel` sets an atomic flag
+that the drain loop polls. The 200 dpi array-switch
 rows (t=48 and t=97 in each 98-line block) are decoded with their group's
 window formula truncated to the wedge (the first 192 columns) and then smoothed
 from the neighbouring lines after deskew, so the page has no dark horizontal

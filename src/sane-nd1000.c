@@ -43,6 +43,7 @@ struct nd_scanner {
     int source;
     int gray;
     int started;
+    _Atomic int cancel;
 };
 
 static _Atomic int open_count;
@@ -198,6 +199,12 @@ static unsigned char *to_gray(const unsigned char *rgb, int pixels, int lines)
 /* Scan one sheet: program, drain the whole image FIFO (all sides share the
  * record stream), then decode the requested side(s) with the recovered
  * per-mode packing. */
+static int scanner_cancelled(void *ref)
+{
+    struct nd_scanner *s = ref;
+    return atomic_load_explicit(&s->cancel, memory_order_relaxed);
+}
+
 static SANE_Status acquire(struct nd_scanner *s)
 {
     struct nd1000_scan_info info;
@@ -210,6 +217,7 @@ static SANE_Status acquire(struct nd_scanner *s)
     r = nd1000_open(&s->dev, -1, -1);
     if (r)
         return r == ND1000_ERR_NODEV ? SANE_STATUS_ACCESS_DENIED : SANE_STATUS_IO_ERROR;
+    nd1000_set_cancel(s->dev, scanner_cancelled, s);
     r = nd1000_paper_present(s->dev);
     if (r <= 0) {
         nd1000_close(s->dev);
@@ -234,6 +242,8 @@ static SANE_Status acquire(struct nd_scanner *s)
         r = stop;
     if (r != ND1000_OK && r != ND1000_EOF) {
         free(raw);
+        if (r == ND1000_ERR_CANCELLED)
+            return SANE_STATUS_CANCELLED;
         return r == ND1000_ERR_NOPAPER ? SANE_STATUS_NO_DOCS : SANE_STATUS_IO_ERROR;
     }
 
@@ -520,6 +530,13 @@ EXPORT SANE_Status sane_nd1000_get_parameters(SANE_Handle handle, SANE_Parameter
 EXPORT SANE_Status sane_nd1000_start(SANE_Handle handle)
 {
     struct nd_scanner *s = handle;
+    /* Clear a cancel from a previous scan before any blocking USB work, so a
+     * cancel that arrives during this scan is not lost. A cancel left over
+     * from an aborted scan also means any buffered back side is stale. */
+    if (atomic_exchange_explicit(&s->cancel, 0, memory_order_relaxed)) {
+        s->have_back = 0;
+        free(s->back); s->back = NULL; s->back_length = 0; s->back_lines = 0;
+    }
     if (s->source != SRC_FRONT && s->resolution != 300)
         return SANE_STATUS_UNSUPPORTED;
     if (s->br_x <= s->tl_x || s->br_y <= s->tl_y)
@@ -539,6 +556,14 @@ EXPORT SANE_Status sane_nd1000_read(SANE_Handle handle, SANE_Byte *data, SANE_In
 {
     struct nd_scanner *s = handle;
     *length = 0;
+    /* A cancel after sane_start cleared the scan: report it and drop state on
+     * the scan thread (sane_cancel only sets the atomic flag). */
+    if (atomic_load_explicit(&s->cancel, memory_order_relaxed)) {
+        s->started = 0;
+        s->have_back = 0;
+        free(s->back); s->back = NULL; s->back_length = 0; s->back_lines = 0;
+        return SANE_STATUS_CANCELLED;
+    }
     if (!s->started || s->offset == s->length) {
         s->started = 0;
         s->params.lines = -1;
@@ -557,9 +582,10 @@ EXPORT SANE_Status sane_nd1000_read(SANE_Handle handle, SANE_Byte *data, SANE_In
 EXPORT void sane_nd1000_cancel(SANE_Handle handle)
 {
     struct nd_scanner *s = handle;
-    s->started = 0;
-    s->have_back = 0;
-    free(s->back); s->back = NULL; s->back_length = 0; s->back_lines = 0;
+    /* Run from another thread; only set the atomic flag. The scan thread
+     * observes it (in nd1000_read_all and in sane_read) and does the cleanup,
+     * so scanner state is never touched from here. */
+    atomic_store_explicit(&s->cancel, 1, memory_order_relaxed);
 }
 EXPORT SANE_Status sane_nd1000_set_io_mode(SANE_Handle handle, SANE_Bool nonblock)
 { (void)handle; return nonblock ? SANE_STATUS_UNSUPPORTED : SANE_STATUS_GOOD; }
